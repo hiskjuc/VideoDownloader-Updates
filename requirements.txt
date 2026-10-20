@@ -1,0 +1,5 @@
+yt-dlp
+PySide6
+curl_cffi
+pyinstaller
+requests

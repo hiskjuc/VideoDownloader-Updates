@@ -1,0 +1,44 @@
+# ==========================================
+# .gitignore para VideoDownloader
+# ==========================================
+
+# 1. Ambientes Virtuais Python
+.venv/
+venv/
+env/
+
+# 2. Cache e Arquivos Temporários do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 3. Artefatos de Build (PyInstaller e Inno Setup)
+build/
+dist/
+dist-installer/
+*.manifest
+
+# NOTA: VideoDownloader.spec NÃO está ignorado (necessário para o build).
+# NOTA: Os scripts do Inno Setup (.iss) NÃO estão ignorados.
+
+# 4. Arquivos Temporários de Download (yt-dlp)
+*.part
+*.ytdl
+*.webm.part
+*.mp4.part
+*.m4a.part
+
+# 5. Arquivos de Sistema Operacional e IDEs
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 6. Artefatos de Publicação (Redundância de segurança)
+# Esses arquivos normalmente vão para a pasta %TEMP%, mas são ignorados
+# aqui para proteger o repositório em caso de testes manuais na raiz.
+checksums.txt
+vd_notes_*.md
+vd_checksum_*/
