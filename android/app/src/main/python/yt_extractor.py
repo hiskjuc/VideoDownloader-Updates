@@ -12,8 +12,12 @@ def get_metadata(url):
 
             title = info.get('title', 'Sem título')
             uploader = info.get('uploader', 'Canal Desconhecido')
-            duration = info.get('duration', 0)
+            duration = info.get('duration')
+            if duration is None:
+                duration_str = "Desconhecida"
+            else:
+                duration_str = f"{duration}s"
 
-            return f"Sucesso!\nTítulo: {title}\nCanal: {uploader}\nDuração: {duration}s"
+            return f"Sucesso!\nTítulo: {title}\nCanal: {uploader}\nDuração: {duration_str}"
     except Exception as e:
         return f"Erro do yt-dlp: {str(e)}"
