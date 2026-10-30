@@ -122,6 +122,36 @@ class TestUIRedesign(unittest.TestCase):
         self.win.aplicar_status("● Normal", "normal")
         self.assertIn("#388BFD", self.win.lbl_status.styleSheet())
 
+    def test_baixar_button_starts_worker_and_restores_state(self):
+        """Regressão: clicar em BAIXAR deve criar e iniciar o DownloadWorker e,
+        ao término, restaurar o botão e os controles."""
+        self.win.input_url.setText("https://www.youtube.com/watch?v=3I9ELvmEyLA")
+        self.win.input_pasta.setText("C:\\Temp")
+        with patch("ui.main_window.DownloadWorker") as mock_worker_cls:
+            self.win.btn_baixar.click()
+            mock_worker_cls.assert_called_once()
+            mock_worker_cls.return_value.start.assert_called_once()
+            self.assertEqual(self.win.btn_baixar.text(), "CANCELAR")
+            self.assertFalse(self.win.combo_formato.isEnabled())
+            self.assertIn("Iniciando", self.win.lbl_status.text())
+
+        self.win.finalizar_download("erro", "Falha simulada")
+        self.assertIn("BAIXAR", self.win.btn_baixar.text().upper())
+        self.assertTrue(self.win.combo_formato.isEnabled())
+        self.assertTrue(self.win.btn_escolher.isEnabled())
+        self.assertIn("Falha simulada", self.win.lbl_status.text())
+
+    def test_worker_unexpected_exception_emits_error(self):
+        """Uma exceção inesperada no download deve ser reportada, não engolida."""
+        from ui.main_window import DownloadWorker
+        worker = DownloadWorker("https://example.com", "C:\\Temp")
+        results = []
+        worker.finished_signal.connect(lambda s, m: results.append((s, m)))
+        with patch("ui.main_window.download_video", side_effect=RuntimeError("boom")):
+            worker.run()
+        self.assertEqual(results[0][0], "erro")
+        self.assertIn("boom", results[0][1])
+
 
 if __name__ == "__main__":
     unittest.main()

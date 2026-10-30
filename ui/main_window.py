@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 from collections import deque
 import tempfile
+import traceback
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QThread, Signal, Qt, QSettings, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent, QStandardItemModel, QStandardItem, QFont, QAction,
-    QDesktopServices
+    QDesktopServices, QIcon
 )
 
 from downloader import download_video, get_fallback_browser
@@ -62,14 +63,20 @@ class DownloadWorker(QThread):
         return self._is_cancelled
 
     def run(self):
-        status, mensagem = download_video(
-            self.url,
-            self.dest_folder,
-            output_format=self.output_format,
-            progress_callback=self.enviar_progresso,
-            is_cancelled=self.checar_cancelamento,
-            active_browser=self.active_browser
-        )
+        try:
+            status, mensagem = download_video(
+                self.url,
+                self.dest_folder,
+                output_format=self.output_format,
+                progress_callback=self.enviar_progresso,
+                is_cancelled=self.checar_cancelamento,
+                active_browser=self.active_browser
+            )
+        except Exception as e:
+            # Garante que a interface sempre saia do estado de download,
+            # registrando o erro em vez de ignorá-lo silenciosamente.
+            traceback.print_exc()
+            status, mensagem = "erro", f"Falha inesperada no download: {e}"
         self.finished_signal.emit(status, mensagem)
 
     def format_speed(self, bps):

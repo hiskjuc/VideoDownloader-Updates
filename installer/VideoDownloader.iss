@@ -2,7 +2,7 @@
 
 [Setup]
 AppName=VideoDownloader
-AppVersion=1.2.0
+AppVersion=1.2.1
 AppPublisher=VideoDownloader
 
 DefaultDirName={autopf}\VideoDownloader
