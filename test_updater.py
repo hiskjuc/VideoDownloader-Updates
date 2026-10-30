@@ -415,6 +415,87 @@ class TestUpdater(unittest.TestCase):
             self.assertIn("cancelado", errors[0].lower())
             self.assertEqual(os.listdir(self.temp_dir), [])
 
+    # 21. Formatação de notas: seção preferencial ("O que mudou" / "Novidades")
+    def test_21_format_release_notes_preferred_section(self):
+        raw = """# Versão 1.2.0
+
+### O que mudou
+- Melhorias na estabilidade dos downloads
+- Correções no processamento de vídeos
+- Ajustes gerais no aplicativo
+"""
+        res = updater.format_release_notes(raw)
+        self.assertIn("- Melhorias na estabilidade dos downloads.", res)
+        self.assertIn("- Correções no processamento de vídeos.", res)
+        self.assertIn("- Ajustes gerais no aplicativo.", res)
+        self.assertEqual(len(res.splitlines()), 3)
+
+    # 22. Formatação de notas: filtros de segurança contra dados técnicos e jurídicos
+    def test_22_format_release_notes_filters_technical_data(self):
+        raw = """## VideoDownloader v1.1.0
+
+### Principais Novidades
+- **FFmpeg e FFprobe integrados**:
+  Executáveis agora acompanham a distribuição na pasta _internal.
+- **Tratamento aprimorado de erros**:
+  Diferencia ausência de binários de falhas de conversão.
+
+### Arquivos e Hashes
+| Arquivo | SHA-256 |
+|---|---|
+| setup.exe | 2d5e8e071cc88cb7259f9d6a75a4e1606c5bad9d4ec3d7363276d737f68f7af1 |
+
+### Licenciamento
+Binários compilados sob a licença GPLv3. Código-fonte upstream em commit 946fcce07b.
+"""
+        res = updater.format_release_notes(raw)
+        self.assertIn("FFmpeg e FFprobe integrados", res)
+        self.assertIn("Tratamento aprimorado de erros", res)
+        self.assertNotIn("2d5e8e071cc88cb7259f9d6a75a4e1606c5bad9d4ec3d7363276d737f68f7af1", res)
+        self.assertNotIn("GPLv3", res)
+        self.assertNotIn("commit 946fcce07b", res)
+        self.assertNotIn("| Arquivo |", res)
+        self.assertNotIn("_internal", res)
+
+    # 23. Formatação de notas: notas vazias ou apenas espaços retornam texto neutro sem inventar mudanças
+    def test_23_format_release_notes_empty_or_whitespace(self):
+        for empty_val in ["", "   \n\t  ", None]:
+            res = updater.format_release_notes(empty_val, owner="UserA", repo="RepoB")
+            self.assertIn("Não há um resumo de alterações disponível para esta versão. Consulte as notas completas no GitHub.", res)
+            self.assertIn("https://github.com/UserA/RepoB/releases", res)
+            self.assertNotIn("Melhorias gerais", res)
+
+    # 24. Formatação de notas: release contendo apenas tabelas ou hashes não produz novidades fictícias
+    def test_24_format_release_notes_table_only_fallback(self):
+        raw = """| Arquivo | Hash |
+| VideoDownloader_Setup.exe | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |"""
+        res = updater.format_release_notes(raw, owner="UserA", repo="RepoB")
+        self.assertIn("Não há um resumo de alterações disponível para esta versão. Consulte as notas completas no GitHub.", res)
+        self.assertNotIn("Melhorias gerais", res)
+
+    # 25. Formatação de notas: limitação de itens ao máximo definido
+    def test_25_format_release_notes_limit_max_items(self):
+        raw = """### Novidades
+- Mudança 1
+- Mudança 2
+- Mudança 3
+- Mudança 4
+- Mudança 5
+- Mudança 6
+"""
+        res = updater.format_release_notes(raw, max_items=3)
+        lines = res.strip().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("Mudança 1", lines[0])
+        self.assertIn("Mudança 3", lines[2])
+
+    # 26. Formatação de notas: parágrafo descritivo simples (estilo v1.0.0)
+    def test_26_format_release_notes_standalone_paragraph(self):
+        raw = "Primeira versão pública do VideoDownloader. Inclui downloads por URL e seleção de formatos."
+        res = updater.format_release_notes(raw)
+        self.assertTrue(res.startswith("- "))
+        self.assertIn("Primeira versão pública do VideoDownloader", res)
+
 
 if __name__ == "__main__":
     unittest.main()

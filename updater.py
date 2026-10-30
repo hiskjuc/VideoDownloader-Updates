@@ -148,6 +148,183 @@ def parse_checksum_manifest(manifest_text: str, target_filename: str = INSTALLER
     raise ValueError(f"Entrada para {target_filename} não encontrada no manifesto de checksums.")
 
 
+EXCLUDE_SECTION_PATTERNS = [
+    r'licen[çc]',
+    r'third[- ]party',
+    r'terceiros',
+    r'gpl',
+    r'arquivos\s+dispon[íi]veis',
+    r'downloads?',
+    r'checksums?',
+    r'hashes',
+    r'sha-?256',
+    r'compila[çc][ãa]o',
+    r'build',
+    r'desenvolvimento',
+    r'instala[çc][ãa]o',
+]
+
+PREFERRED_SECTION_PATTERNS = [
+    r'o\s+que\s+mudou',
+    r'novidades',
+    r'mudan[çc]as',
+    r'altera[çc][õo]es',
+    r'principais',
+    r'destaques',
+    r"what'?s\s+changed",
+    r'changelog',
+    r'highlights',
+]
+
+TECHNICAL_PATTERNS = [
+    r'\b[a-fA-F0-9]{32,64}\b',
+    r'checksums\.txt',
+    r'_internal\b',
+    r'pyinstaller\b',
+    r'sys\._meipass\b',
+    r'commit\s+[a-f0-9]+',
+    r'gplv\d\b',
+    r'gnu general public',
+    r'gyan\.dev',
+    r'inno setup',
+]
+
+
+def clean_markdown_formatting(text: str) -> str:
+    """Remove marcadores de formatação Markdown e caracteres decorativos."""
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    text = re.sub(r'[*_]{1,3}([^*_]+)[*_]{1,3}', r'\1', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    text = re.sub(r'^[\s\W\d_]*?[•\-*+]\s*', '', text)
+    text = re.sub(r'^[^\w\s-]+\s*', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def parse_items_from_markdown(raw_notes: str) -> list[str]:
+    """Extrai itens relevantes de alterações a partir do texto em Markdown da release."""
+    text = re.sub(r'```[\s\S]*?```', '', raw_notes)
+    text = re.sub(r'<!--[\s\S]*?-->', '', text)
+
+    lines = text.splitlines()
+
+    preferred_items = []
+    generic_items = []
+
+    is_preferred_section = False
+    is_excluded_section = False
+
+    current_item_lines = []
+    current_item_is_preferred = False
+
+    def flush_current_item():
+        nonlocal current_item_lines, current_item_is_preferred
+        if not current_item_lines:
+            return
+        full_item_raw = " ".join(current_item_lines).strip()
+        current_item_lines = []
+
+        item_text = ""
+        match_bold = re.match(r'^\s*[*_]{2}([^*_]+)[*_]{2}[:\s-]*(.*)$', full_item_raw)
+        if match_bold:
+            header_part = clean_markdown_formatting(match_bold.group(1))
+            detail_part = clean_markdown_formatting(match_bold.group(2))
+
+            if any(re.search(pat, header_part, re.IGNORECASE) for pat in TECHNICAL_PATTERNS):
+                return
+
+            if len(header_part) >= 6:
+                if (detail_part and
+                    not any(re.search(pat, detail_part, re.IGNORECASE) for pat in TECHNICAL_PATTERNS) and
+                    len(detail_part) <= 90):
+                    item_text = f"{header_part}: {detail_part}"
+                else:
+                    item_text = header_part
+        else:
+            if any(re.search(pat, full_item_raw, re.IGNORECASE) for pat in TECHNICAL_PATTERNS):
+                return
+            item_text = clean_markdown_formatting(full_item_raw)
+
+        item_text = re.sub(r'[:\-–—\s]+$', '', item_text).strip()
+
+        if item_text and len(item_text) >= 5:
+            if len(item_text) > 160:
+                m = re.match(r'^(.{60,150}[.!?])\s', item_text)
+                if m:
+                    item_text = m.group(1)
+                else:
+                    item_text = item_text[:140].rsplit(' ', 1)[0] + '...'
+
+            if not item_text.endswith(('.', '!', '?')):
+                item_text += '.'
+
+            if current_item_is_preferred:
+                preferred_items.append(item_text)
+            else:
+                generic_items.append(item_text)
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith('#'):
+            flush_current_item()
+            heading_text = stripped.lstrip('#').strip().lower()
+
+            is_excluded_section = any(re.search(pat, heading_text) for pat in EXCLUDE_SECTION_PATTERNS)
+            is_preferred_section = any(re.search(pat, heading_text) for pat in PREFERRED_SECTION_PATTERNS)
+            continue
+
+        if is_excluded_section:
+            continue
+
+        if stripped.startswith('|') or stripped.endswith('|') or set(stripped) <= {'-', '|', ':', ' '}:
+            flush_current_item()
+            continue
+
+        match_bullet = re.match(r'^[-*+•]\s+(.*)$', stripped) or re.match(r'^\d+\.\s+(.*)$', stripped)
+        if match_bullet:
+            flush_current_item()
+            current_item_is_preferred = is_preferred_section
+            current_item_lines = [match_bullet.group(1).strip()]
+        elif current_item_lines and (line.startswith(' ') or line.startswith('\t')):
+            current_item_lines.append(stripped)
+        elif not current_item_lines and not stripped.startswith('#'):
+            clean_para = clean_markdown_formatting(stripped)
+            if len(clean_para) >= 15 and not any(re.search(pat, stripped, re.IGNORECASE) for pat in TECHNICAL_PATTERNS):
+                if is_preferred_section:
+                    current_item_is_preferred = True
+                    current_item_lines = [stripped]
+                    flush_current_item()
+                elif not generic_items and not preferred_items:
+                    generic_items.append(clean_para if clean_para.endswith('.') else clean_para + '.')
+
+    flush_current_item()
+
+    return preferred_items if preferred_items else generic_items
+
+
+def format_release_notes(raw_notes: str, max_items: int = 4, owner: str = "", repo: str = "") -> str:
+    """
+    Formata o texto bruto das notas de lançamento (Markdown) em um resumo conciso,
+    filtrando tabelas, hashes, termos jurídicos e dados técnicos internos.
+    """
+    fallback = "- Não há um resumo de alterações disponível para esta versão. Consulte as notas completas no GitHub."
+    if owner and repo:
+        fallback += f"\n\nNotas completas: https://github.com/{owner}/{repo}/releases"
+
+    if not isinstance(raw_notes, str) or not raw_notes.strip():
+        return fallback
+
+    items = parse_items_from_markdown(raw_notes)
+    if not items:
+        return fallback
+
+    selected = items[:max_items]
+    return "\n".join(f"- {it}" for it in selected)
+
+
 class UpdateChecker(QThread):
     """Consulta a última release estável no GitHub em segundo plano."""
     # version, notes, installer_url, checksum_url, api_sha256
