@@ -1,12 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 block_cipher = None
 
+# Resolve o caminho absoluto do diretório contendo o arquivo .spec
+spec_dir = os.path.abspath(SPECPATH)
+
+ff_binaries = []
+ffmpeg_path = os.path.join(spec_dir, 'ffmpeg.exe')
+ffprobe_path = os.path.join(spec_dir, 'ffprobe.exe')
+
+# Só inclui no empacotamento se ambos os binários estiverem disponíveis no diretório do .spec
+if os.path.exists(ffmpeg_path) and os.path.exists(ffprobe_path):
+    ff_binaries.append((ffmpeg_path, '.'))
+    ff_binaries.append((ffprobe_path, '.'))
+
+extra_datas = []
+license_path = os.path.join(spec_dir, 'LICENSE-FFMPEG.txt')
+if os.path.exists(license_path):
+    extra_datas.append((license_path, '.'))
+
 a = Analysis(
-    ['main.py'],
-    pathex=[],
-    binaries=[],
-    datas=[],
+    [os.path.join(spec_dir, 'main.py')],
+    pathex=[spec_dir],
+    binaries=ff_binaries,
+    datas=extra_datas,
     hiddenimports=[
         'yt_dlp',
         'yt_dlp.extractor',

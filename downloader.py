@@ -1,3 +1,4 @@
+import sys
 import yt_dlp
 import pathlib
 import os
@@ -137,6 +138,32 @@ def get_fallback_browser():
     return None
 
 
+def get_ffmpeg_dir():
+    """
+    Verifica a presença dos executáveis FFmpeg e FFprobe no diretório do aplicativo.
+    Retorna o caminho do diretório se ambos existirem, caso contrário retorna None para usar o PATH.
+    """
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        # No PyInstaller (ONEDIR ou ONEFILE), tenta usar _MEIPASS, com fallback para o diretório do executável
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(meipass)
+        candidates.append(os.path.dirname(sys.executable))
+    else:
+        # Ambiente de desenvolvimento local
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+
+    for base_path in candidates:
+        ffmpeg_path = os.path.join(base_path, 'ffmpeg.exe')
+        ffprobe_path = os.path.join(base_path, 'ffprobe.exe')
+
+        if os.path.exists(ffmpeg_path) and os.path.exists(ffprobe_path):
+            return base_path
+
+    return None
+
+
 def download_video(url: str, dest_folder: str, output_format: str = "mp4", progress_callback=None, is_cancelled=None, active_browser=None):
     """
     Realiza o download e conversão de mídia na URL informada.
@@ -241,6 +268,11 @@ def download_video(url: str, dest_folder: str, output_format: str = "mp4", progr
     # Mescla as opções específicas de vídeo ou áudio
     ydl_opts.update(build_format_options(fmt))
 
+    # Tenta definir a localização do FFmpeg distribuído. Se for None, o yt-dlp fará fallback no PATH.
+    ffmpeg_dir = get_ffmpeg_dir()
+    if ffmpeg_dir:
+        ydl_opts['ffmpeg_location'] = ffmpeg_dir
+
     browser = active_browser
     if not browser:
         browser = get_fallback_browser()
@@ -308,8 +340,10 @@ def download_video(url: str, dest_folder: str, output_format: str = "mp4", progr
 
             print(f"\nERRO yt-dlp: {e}")
 
-            if "ffmpeg" in error_msg or "ffprobe" in error_msg or "postprocessing" in error_msg or "conversion failed" in error_msg:
-                return "erro", f"Falha ao converter para {fmt.upper()}. Verifique se o FFmpeg está instalado e acessível."
+            if ("ffmpeg" in error_msg or "ffprobe" in error_msg) and ("not found" in error_msg or "is not installed" in error_msg or "not recognized" in error_msg):
+                return "erro", f"FFmpeg não encontrado. É necessário o executável (local ou no PATH) para converter para {fmt.upper()}."
+            elif "ffmpeg" in error_msg or "ffprobe" in error_msg or "postprocessing" in error_msg or "conversion failed" in error_msg:
+                return "erro", f"Falha no pós-processamento para {fmt.upper()}. Detalhe: {str(e)}"
             elif "requested format is not available" in error_msg or "no video formats" in error_msg or "no playable video" in error_msg:
                 return "erro", "Formato solicitado indisponível ou a página não contém mídia compatível."
             elif "drm" in error_msg or "protected" in error_msg:

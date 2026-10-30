@@ -42,3 +42,5 @@ Desktop.ini
 checksums.txt
 vd_notes_*.md
 vd_checksum_*/
+/ffmpeg.exe
+/ffprobe.exe
