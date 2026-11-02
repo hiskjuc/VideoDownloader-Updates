@@ -35,6 +35,11 @@ LIGHT_PALETTE = {
     "nav_icon_active": "#FFFFFF",
     "wave_color_1": "rgba(225, 236, 252, 0.7)",
     "wave_color_2": "rgba(215, 230, 250, 0.5)",
+    "warning_box_bg": "#FFFBEB",
+    "warning_box_border": "#FDE68A",
+    "warning_title": "#92400E",
+    "warning_text": "#78350F",
+    "warning_icon": "#D97706",
 }
 
 DARK_PALETTE = {
@@ -69,6 +74,11 @@ DARK_PALETTE = {
     "nav_icon_active": "#FFFFFF",
     "wave_color_1": "rgba(35, 45, 60, 0.6)",
     "wave_color_2": "rgba(28, 38, 52, 0.4)",
+    "warning_box_bg": "rgba(245, 158, 11, 0.10)",
+    "warning_box_border": "rgba(245, 158, 11, 0.30)",
+    "warning_title": "#FBBF24",
+    "warning_text": "#D6D3D1",
+    "warning_icon": "#F59E0B",
 }
 
 
@@ -317,6 +327,151 @@ def get_theme_stylesheet(theme: str) -> str:
         background-color: {p["accent_blue"]};
         color: #FFFFFF;
         border-color: {p["accent_blue"]};
+    }}
+
+
+    /* Seletor Segmentado de Modo (Vídeo / Somente Áudio) */
+    #modeSelectorContainer {{
+        background-color: {p["subcard_bg"]};
+        border: 1px solid {p["subcard_border"]};
+        border-radius: 8px;
+        padding: 3px;
+    }}
+    QPushButton.modeButton {{
+        background-color: transparent;
+        color: {p["text_secondary"]};
+        border: none;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 16px;
+        min-height: 18px;
+    }}
+    QPushButton.modeButton:hover {{
+        color: {p["text_primary"]};
+        background-color: {p["card_bg"]};
+    }}
+    QPushButton.modeButton[active="true"] {{
+        background-color: {p["accent_blue"]};
+        color: #FFFFFF;
+    }}
+    QPushButton.modeButton[active="true"]:hover {{
+        background-color: {p["accent_blue_hover"]};
+    }}
+
+    /* Combobox de Qualidade / Resolução */
+    #qualityCombo {{
+        background-color: {p["input_bg"]};
+        border: 1px solid {p["input_border"]};
+        border-radius: 6px;
+        padding: 6px 12px;
+        min-height: 20px;
+        font-size: 12px;
+        color: {p["text_primary"]};
+    }}
+    #qualityCombo:focus {{
+        border: 1px solid {p["input_focus_border"]};
+    }}
+    #qualityCombo:disabled {{
+        background-color: {p["subcard_bg"]};
+        color: {p["text_muted"]};
+    }}
+    #qualityCombo::drop-down {{
+        border: none;
+        width: 24px;
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+    }}
+    #qualityCombo QAbstractItemView {{
+        background-color: {p["card_bg"]};
+        border: 1px solid {p["card_border"]};
+        selection-background-color: {p["accent_blue"]};
+        selection-color: #FFFFFF;
+        padding: 4px;
+        border-radius: 6px;
+    }}
+
+    /* Painel e Controles de Upscaling (FFmpeg Lanczos) */
+    #upscaleContainer {{
+        background-color: {p["subcard_bg"]};
+        border: 1px solid {p["subcard_border"]};
+        border-radius: 8px;
+        padding: 6px 12px;
+    }}
+    QCheckBox#upscaleCheckBox {{
+        font-size: 12px;
+        font-weight: 600;
+        color: {p["text_primary"]};
+        spacing: 8px;
+    }}
+    QCheckBox#upscaleCheckBox::indicator {{
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border: 1.5px solid {p["input_border"]};
+        background-color: {p["input_bg"]};
+    }}
+    QCheckBox#upscaleCheckBox::indicator:hover {{
+        border-color: {p["accent_blue"]};
+    }}
+    QCheckBox#upscaleCheckBox::indicator:checked {{
+        background-color: {p["accent_blue"]};
+        border-color: {p["accent_blue"]};
+    }}
+    #upscaleCombo {{
+        background-color: {p["input_bg"]};
+        border: 1px solid {p["input_border"]};
+        border-radius: 6px;
+        padding: 4px 10px;
+        min-height: 18px;
+        font-size: 12px;
+        color: {p["text_primary"]};
+    }}
+    #upscaleCombo:focus {{
+        border: 1px solid {p["input_focus_border"]};
+    }}
+    #upscaleCombo:disabled {{
+        background-color: {p["subcard_bg"]};
+        color: {p["text_muted"]};
+    }}
+    #upscaleCombo::drop-down {{
+        border: none;
+        width: 20px;
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+    }}
+    #upscaleCombo QAbstractItemView {{
+        background-color: {p["card_bg"]};
+        border: 1px solid {p["card_border"]};
+        selection-background-color: {p["accent_blue"]};
+        selection-color: #FFFFFF;
+        padding: 4px;
+        border-radius: 6px;
+    }}
+    #upscaleInfoLabel {{
+        color: {p["text_muted"]};
+        font-size: 13px;
+        padding: 2px;
+    }}
+    #upscaleInfoLabel:hover {{
+        color: {p["accent_blue"]};
+    }}
+
+    /* Aviso de alto consumo de CPU no Upscaling */
+    #upscaleWarningBox {{
+        background-color: {p["warning_box_bg"]};
+        border: 1px solid {p["warning_box_border"]};
+        border-radius: 6px;
+        margin-top: 4px;
+    }}
+    #upscaleWarningTitle {{
+        font-size: 11px;
+        font-weight: 700;
+        color: {p["warning_title"]};
+    }}
+    #upscaleWarningBody {{
+        font-size: 11px;
+        color: {p["warning_text"]};
     }}
 
     /* Badges e tags */

@@ -9,7 +9,7 @@ import traceback
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFileDialog, QProgressBar, QComboBox,
+    QPushButton, QFileDialog, QProgressBar, QComboBox, QCheckBox,
     QMenuBar, QMessageBox, QProgressDialog, QStackedWidget,
     QFrame, QSizePolicy, QScrollArea
 )
@@ -19,14 +19,18 @@ from PySide6.QtGui import (
     QDesktopServices, QIcon
 )
 
-from downloader import download_video, get_fallback_browser
+from downloader import (
+    download_video, get_fallback_browser, VIDEO_FORMATS, AUDIO_FORMATS,
+    VIDEO_RESOLUTIONS, AUDIO_BITRATES, extract_media_info
+)
 from version import __version__, GITHUB_OWNER, GITHUB_REPO
 from updater import UpdateChecker, UpdateDownloader, format_release_notes
 
 from ui.icons import (
     get_app_icon_pixmap, get_link_icon, get_folder_icon,
     get_folder_pixmap, get_document_icon, get_document_pixmap,
-    get_download_button_icon
+    get_download_button_icon, get_video_icon, get_video_pixmap,
+    get_audio_icon, get_audio_pixmap, get_quality_icon, get_quality_pixmap, get_upscale_icon, get_upscale_pixmap, get_warning_pixmap
 )
 from ui.theme import get_theme_palette, get_theme_stylesheet
 from ui.widgets import (
@@ -42,16 +46,48 @@ WINEVENTPROC = ctypes.WINFUNCTYPE(
 )
 
 
+class MediaInfoWorker(QThread):
+    info_ready = Signal(dict)
+    error_signal = Signal(str)
+
+    def __init__(self, url, active_browser=None):
+        super().__init__()
+        self.url = url
+        self.active_browser = active_browser
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        try:
+            if self._is_cancelled:
+                return
+            res = extract_media_info(self.url, active_browser=self.active_browser)
+            if self._is_cancelled:
+                return
+            if res.get("sucesso"):
+                self.info_ready.emit(res)
+            else:
+                self.error_signal.emit(res.get("mensagem", "Erro ao obter dados da mídia"))
+        except Exception as e:
+            if not self._is_cancelled:
+                self.error_signal.emit(str(e))
+
+
 class DownloadWorker(QThread):
     finished_signal = Signal(str, str)
     progress_signal = Signal(dict)
 
-    def __init__(self, url, dest_folder, output_format="mp4", active_browser=None):
+    def __init__(self, url, dest_folder, output_format="mp4", active_browser=None, video_quality="best", audio_quality="best", upscale_quality=None):
         super().__init__()
         self.url = url
         self.dest_folder = dest_folder
         self.output_format = output_format
         self.active_browser = active_browser
+        self.video_quality = video_quality
+        self.audio_quality = audio_quality
+        self.upscale_quality = upscale_quality
         self._is_cancelled = False
         self.speed_history = deque(maxlen=30)
         self.last_text_update = 0
@@ -68,6 +104,9 @@ class DownloadWorker(QThread):
                 self.url,
                 self.dest_folder,
                 output_format=self.output_format,
+                video_quality=self.video_quality,
+                audio_quality=self.audio_quality,
+                upscale_quality=self.upscale_quality,
                 progress_callback=self.enviar_progresso,
                 is_cancelled=self.checar_cancelamento,
                 active_browser=self.active_browser
@@ -147,17 +186,33 @@ class MainWindow(QWidget):
         super().__init__()
         self.settings = QSettings("VideoDownloaderApp", "VideoDownloader")
         self.setWindowTitle(f"VideoDownloader v{__version__}")
-        self.resize(740, 580)
-        self.setMinimumSize(680, 530)
+        self.resize(740, 620)
+        self.setMinimumSize(680, 560)
         self.setObjectName("mainWindowWidget")
 
         # Configuração do tema (Padrão: Light Mode)
         salvo = self.settings.value("theme", "light")
         self.current_theme = "dark" if salvo == "dark" else "light"
 
+        # Configuração do modo inicial (Vídeo ou Somente Áudio)
+        formato_salvo = str(self.settings.value("output_format", "mp4")).lower()
+        modo_salvo = str(self.settings.value("download_mode", "")).lower()
+        if modo_salvo in ("video", "audio"):
+            self.current_mode = modo_salvo
+        else:
+            self.current_mode = "audio" if formato_salvo in AUDIO_FORMATS else "video"
+
         self.worker = None
+        self.media_info_worker = None
         self.update_checker = None
         self.update_downloader = None
+        self.current_media_info = None
+        self._analyzed_url = ""
+
+        self._url_debounce_timer = QTimer(self)
+        self._url_debounce_timer.setSingleShot(True)
+        self._url_debounce_timer.setInterval(700)
+        self._url_debounce_timer.timeout.connect(self._consultar_info_url)
         self.progress_dialog = None
         self._is_silent_update = False
         self._closing_pending = False
@@ -381,6 +436,8 @@ class MainWindow(QWidget):
         ativas = []
         if self.worker and self.worker.isRunning():
             ativas.append(self.worker)
+        if self.media_info_worker and self.media_info_worker.isRunning():
+            ativas.append(self.media_info_worker)
         if self.update_checker and self.update_checker.isRunning():
             ativas.append(self.update_checker)
         if self.update_downloader and self.update_downloader.isRunning():
@@ -393,6 +450,8 @@ class MainWindow(QWidget):
 
         if self.worker and self.worker.isRunning():
             self.worker.cancelar()
+        if self.media_info_worker and self.media_info_worker.isRunning():
+            self.media_info_worker.cancel()
         if self.update_checker and self.update_checker.isRunning():
             self.update_checker.cancel()
         if self.update_downloader and self.update_downloader.isRunning():
@@ -419,18 +478,37 @@ class MainWindow(QWidget):
 
         super().closeEvent(event)
 
+    def set_mode(self, mode: str):
+        if mode not in ("video", "audio"):
+            mode = "video"
+        self.current_mode = mode
+        self.settings.setValue("download_mode", mode)
+
+        palette = get_theme_palette(self.current_theme)
+        if hasattr(self, "btn_mode_video") and hasattr(self, "btn_mode_audio"):
+            is_vid = (mode == "video")
+            self.btn_mode_video.setProperty("active", "true" if is_vid else "false")
+            self.btn_mode_audio.setProperty("active", "false" if is_vid else "true")
+            self.btn_mode_video.setIcon(get_video_icon("white" if is_vid else palette["text_secondary"], 16))
+            self.btn_mode_audio.setIcon(get_audio_icon("white" if not is_vid else palette["text_secondary"], 16))
+            self.btn_mode_video.style().unpolish(self.btn_mode_video)
+            self.btn_mode_video.style().polish(self.btn_mode_video)
+            self.btn_mode_audio.style().unpolish(self.btn_mode_audio)
+            self.btn_mode_audio.style().polish(self.btn_mode_audio)
+
+        self._popular_formatos()
+        self._popular_qualidades()
+        if hasattr(self, "_atualizar_opcoes_upscaling"):
+            self._atualizar_opcoes_upscaling()
+
     def _popular_formatos(self):
+        if not hasattr(self, "combo_formato"):
+            return
+
+        self.combo_formato.blockSignals(True)
         model = QStandardItemModel()
         palette = get_theme_palette(self.current_theme)
         doc_icon = get_document_icon(palette["accent_blue"], 16)
-
-        def add_header(titulo):
-            item = QStandardItem(titulo)
-            item.setFlags(Qt.NoItemFlags)
-            font = QFont()
-            font.setBold(True)
-            item.setFont(font)
-            model.appendRow(item)
 
         def add_option(label, valor):
             item = QStandardItem(f" {label}")
@@ -438,16 +516,26 @@ class MainWindow(QWidget):
             item.setIcon(doc_icon)
             model.appendRow(item)
 
-        add_header("── Formatos de Vídeo ──")
-        for fmt in ["MP4", "MKV", "WebM", "MOV", "AVI"]:
-            add_option(f"{fmt} (Vídeo)", fmt.lower())
-
-        add_header("── Formatos de Áudio ──")
-        for fmt in ["MP3", "M4A", "WAV", "FLAC", "Opus"]:
-            add_option(f"{fmt} (Somente Áudio)", fmt.lower())
+        if self.current_mode == "video":
+            if hasattr(self, "lbl_formato"):
+                self.lbl_formato.setText("Formato de vídeo")
+            for fmt in ["MP4", "MKV", "WebM", "MOV", "AVI"]:
+                add_option(f"{fmt} (Vídeo)", fmt.lower())
+            formato_salvo = str(self.settings.value("output_format", "mp4")).lower()
+            if formato_salvo not in VIDEO_FORMATS:
+                formato_salvo = "mp4"
+        else:
+            if hasattr(self, "lbl_formato"):
+                self.lbl_formato.setText("Formato de áudio")
+            for fmt in ["MP3", "M4A", "Opus", "WAV", "FLAC"]:
+                label = f"{fmt} (Lossless)" if fmt in ("WAV", "FLAC") else f"{fmt} (Áudio)"
+                add_option(label, fmt.lower())
+            formato_salvo = str(self.settings.value("output_format", "mp3")).lower()
+            if formato_salvo not in AUDIO_FORMATS:
+                formato_salvo = "mp3"
 
         self.combo_formato.setModel(model)
-        formato_salvo = str(self.settings.value("output_format", "mp4")).lower()
+
         idx_encontrado = -1
         for i in range(model.rowCount()):
             if model.item(i).data(Qt.UserRole) == formato_salvo:
@@ -457,13 +545,222 @@ class MainWindow(QWidget):
         if idx_encontrado != -1:
             self.combo_formato.setCurrentIndex(idx_encontrado)
         else:
-            self.combo_formato.setCurrentIndex(1)
-        self.combo_formato.currentIndexChanged.connect(self._salvar_formato_escolhido)
+            self.combo_formato.setCurrentIndex(0)
+
+        self.combo_formato.blockSignals(False)
 
     def _salvar_formato_escolhido(self):
         formato_atual = self.combo_formato.currentData(Qt.UserRole)
         if formato_atual:
             self.settings.setValue("output_format", formato_atual)
+            if self.current_mode == "audio" and hasattr(self, "combo_qualidade"):
+                self._popular_qualidades()
+
+    def _popular_qualidades(self):
+        if not hasattr(self, "combo_qualidade"):
+            return
+
+        self.combo_qualidade.blockSignals(True)
+        model = QStandardItemModel()
+        palette = get_theme_palette(self.current_theme)
+
+        def add_opt(label, valor):
+            item = QStandardItem(f" {label}")
+            item.setData(valor, Qt.UserRole)
+            model.appendRow(item)
+
+        if self.current_mode == "video":
+            if hasattr(self, "lbl_qualidade"):
+                self.lbl_qualidade.setText("Resolução")
+            if hasattr(self, "lbl_qualidade_icon"):
+                self.lbl_qualidade_icon.setPixmap(get_quality_pixmap(palette["text_secondary"], 16))
+
+            self.combo_qualidade.setEnabled(True)
+            self.combo_qualidade.setToolTip("Selecione a resolução máxima desejada para o download do vídeo.")
+
+            add_opt("Melhor disponível (padrão)", "best")
+
+            if self.current_media_info and self.current_media_info.get("available_resolutions"):
+                for key, label in self.current_media_info["available_resolutions"]:
+                    add_opt(label, key)
+            else:
+                for key, label in VIDEO_RESOLUTIONS[1:]:
+                    add_opt(label, key)
+
+            qualidade_salva = str(self.settings.value("video_quality", "best"))
+
+        else:
+            if hasattr(self, "lbl_qualidade"):
+                self.lbl_qualidade.setText("Qualidade do áudio")
+            if hasattr(self, "lbl_qualidade_icon"):
+                self.lbl_qualidade_icon.setPixmap(get_audio_pixmap(palette["text_secondary"], 16))
+
+            fmt_atual = self.combo_formato.currentData(Qt.UserRole) or "mp3"
+            if fmt_atual in ("wav", "flac"):
+                add_opt("Melhor qualidade (Lossless)", "best")
+                self.combo_qualidade.setEnabled(False)
+                self.combo_qualidade.setToolTip("Formatos WAV e FLAC mantêm a integridade sem perdas (lossless) do áudio.")
+                qualidade_salva = "best"
+            else:
+                self.combo_qualidade.setEnabled(True)
+                tooltip_txt = "Selecione a taxa de bits desejada para a extração do áudio."
+                if self.current_media_info and self.current_media_info.get("max_audio_bitrate"):
+                    tooltip_txt += f" (Taxa nativa estimada da fonte: ~{self.current_media_info['max_audio_bitrate']} kbps)"
+                self.combo_qualidade.setToolTip(tooltip_txt)
+
+                for key, label in AUDIO_BITRATES:
+                    add_opt(label, key)
+
+                qualidade_salva = str(self.settings.value("audio_quality", "best"))
+
+        self.combo_qualidade.setModel(model)
+
+        idx_encontrado = -1
+        for i in range(model.rowCount()):
+            if model.item(i).data(Qt.UserRole) == qualidade_salva:
+                idx_encontrado = i
+                break
+
+        if idx_encontrado != -1:
+            self.combo_qualidade.setCurrentIndex(idx_encontrado)
+        else:
+            self.combo_qualidade.setCurrentIndex(0)
+
+        self.combo_qualidade.blockSignals(False)
+
+    def _salvar_qualidade_escolhida(self):
+        qualidade_atual = self.combo_qualidade.currentData(Qt.UserRole)
+        if qualidade_atual:
+            if self.current_mode == "video":
+                self.settings.setValue("video_quality", qualidade_atual)
+            else:
+                self.settings.setValue("audio_quality", qualidade_atual)
+
+    def _on_upscale_toggled(self, checked: bool):
+        if hasattr(self, "combo_upscaling"):
+            self.combo_upscaling.setEnabled(checked)
+        if hasattr(self, "box_upscale_warning"):
+            self.box_upscale_warning.setVisible(checked)
+            if hasattr(self, "container_upscaling"):
+                self.container_upscaling.adjustSize()
+
+    def _atualizar_opcoes_upscaling(self):
+        if not hasattr(self, "container_upscaling") or not hasattr(self, "combo_upscaling"):
+            return
+
+        if self.current_mode != "video" or not self.current_media_info:
+            self.container_upscaling.hide()
+            return
+
+        max_h = self.current_media_info.get("max_height") or 0
+        all_tiers = [
+            (720, "720p", "720p (HD)"),
+            (1080, "1080p", "1080p (Full HD)"),
+            (1440, "1440p", "1440p (2K)"),
+            (2160, "2160p", "2160p (4K)")
+        ]
+        # Permite apenas resoluções superiores à resolução original da mídia
+        superior = [item for item in all_tiers if item[0] > max_h]
+
+        if superior:
+            self.combo_upscaling.blockSignals(True)
+            self.combo_upscaling.clear()
+            for _, key, label in superior:
+                self.combo_upscaling.addItem(f"Para: {label}", key)
+            self.combo_upscaling.blockSignals(False)
+            self.chk_upscaling.setChecked(False)
+            self.combo_upscaling.setEnabled(False)
+            self.container_upscaling.show()
+        else:
+            self.container_upscaling.hide()
+
+    def _on_url_text_changed(self, text: str):
+        # Ao alterar a URL, oculta temporariamente o seletor de qualidade e o upscaling
+        if hasattr(self, "subcard_qualidade"):
+            self.subcard_qualidade.hide()
+        if hasattr(self, "container_upscaling"):
+            self.container_upscaling.hide()
+
+        self.current_media_info = None
+        self._analyzed_url = ""
+
+        if self.media_info_worker and self.media_info_worker.isRunning():
+            self.media_info_worker.cancel()
+            self.media_info_worker = None
+
+        url = text.strip()
+        if len(url) > 10 and (url.startswith("http://") or url.startswith("https://")):
+            self._url_debounce_timer.start()
+        else:
+            self._url_debounce_timer.stop()
+            if not self.worker or not self.worker.isRunning():
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(0)
+                self.lbl_stats.hide()
+                self.aplicar_status("● Pronto para baixar", "normal")
+
+    def _consultar_info_url(self):
+        url = self.input_url.text().strip()
+        if not url or len(url) <= 10 or not (url.startswith("http://") or url.startswith("https://")):
+            return
+
+        if self.media_info_worker and self.media_info_worker.isRunning():
+            self.media_info_worker.cancel()
+            self.media_info_worker = None
+
+        # Indicador discreto de carregamento durante a análise
+        self.aplicar_status("● Analisando formatos disponíveis...", "normal")
+        self.lbl_stats.setText("Identificando resoluções suportadas na página...")
+        self.lbl_stats.show()
+        self.progress_bar.setRange(0, 0)
+
+        browser_pref = self.settings.value("preferred_browser", "auto")
+        chosen_browser = self.last_active_browser if browser_pref == "auto" else browser_pref
+
+        self.media_info_worker = MediaInfoWorker(url, active_browser=chosen_browser)
+        self.media_info_worker.info_ready.connect(self._on_media_info_ready)
+        self.media_info_worker.error_signal.connect(self._on_media_info_error)
+        self.media_info_worker.start()
+
+    def _on_media_info_ready(self, info: dict):
+        # Prevenção de race condition: ignora resultado se a URL atual for diferente da analisada
+        current_url = self.input_url.text().strip()
+        if info.get("url") and info["url"] != current_url:
+            return
+
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.lbl_stats.hide()
+
+        self.current_media_info = info
+        self._analyzed_url = current_url
+
+        self._popular_qualidades()
+        if hasattr(self, "combo_qualidade"):
+            self.combo_qualidade.setCurrentIndex(0)
+        if hasattr(self, "subcard_qualidade"):
+            self.subcard_qualidade.show()
+
+        self._atualizar_opcoes_upscaling()
+
+        titulo = info.get("title", "")
+        if titulo:
+            trunc_title = (titulo[:42] + "...") if len(titulo) > 45 else titulo
+            self.aplicar_status(f"● Link identificado: {trunc_title}", "sucesso")
+        else:
+            self.aplicar_status("● Pronto para baixar", "normal")
+
+    def _on_media_info_error(self, err_msg: str):
+        # Se a análise falhar, encerra indicador discreto e informa o usuário sem bloquear
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.lbl_stats.hide()
+        if hasattr(self, "subcard_qualidade"):
+            self.subcard_qualidade.hide()
+        if hasattr(self, "container_upscaling"):
+            self.container_upscaling.hide()
+        self.aplicar_status("● Não foi possível identificar as qualidades deste link.", "aviso")
+        print(f"[MediaInfo] Consulta preliminar da URL: {err_msg}")
 
     def setup_ui(self):
         # Layout raiz horizontal: Barra Lateral (esquerda) + Área de Conteúdo (direita)
@@ -566,8 +863,8 @@ class MainWindow(QWidget):
         self.main_card = QFrame()
         self.main_card.setObjectName("mainCard")
         card_layout = QVBoxLayout(self.main_card)
-        card_layout.setContentsMargins(20, 20, 20, 20)
-        card_layout.setSpacing(14)
+        card_layout.setContentsMargins(18, 14, 18, 14)
+        card_layout.setSpacing(10)
 
         # 1. Rótulo e Campo de URL em destaque
         lbl_url = QLabel("URL do vídeo")
@@ -577,6 +874,7 @@ class MainWindow(QWidget):
         self.input_url = QLineEdit()
         self.input_url.setObjectName("urlInput")
         self.input_url.setPlaceholderText("Cole aqui o link do vídeo...")
+        self.input_url.textChanged.connect(self._on_url_text_changed)
         palette = get_theme_palette(self.current_theme)
         self.action_link_icon = self.input_url.addAction(
             get_link_icon(palette["text_muted"], 18),
@@ -584,7 +882,40 @@ class MainWindow(QWidget):
         )
         card_layout.addWidget(self.input_url)
 
-        # 2. Linha horizontal com os dois subcartões (Pasta de destino e Formato de saída)
+        # Seletor Segmentado de Modo (Vídeo / Somente Áudio)
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(8)
+
+        mode_container = QFrame()
+        mode_container.setObjectName("modeSelectorContainer")
+        mode_layout = QHBoxLayout(mode_container)
+        mode_layout.setContentsMargins(4, 4, 4, 4)
+        mode_layout.setSpacing(4)
+
+        is_video = (self.current_mode == "video")
+
+        self.btn_mode_video = QPushButton("  Vídeo")
+        self.btn_mode_video.setProperty("class", "modeButton")
+        self.btn_mode_video.setProperty("active", "true" if is_video else "false")
+        self.btn_mode_video.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_video.setIcon(get_video_icon("white" if is_video else palette["text_secondary"], 16))
+        self.btn_mode_video.clicked.connect(lambda: self.set_mode("video"))
+
+        self.btn_mode_audio = QPushButton("  Somente Áudio")
+        self.btn_mode_audio.setProperty("class", "modeButton")
+        self.btn_mode_audio.setProperty("active", "false" if is_video else "true")
+        self.btn_mode_audio.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_audio.setIcon(get_audio_icon("white" if not is_video else palette["text_secondary"], 16))
+        self.btn_mode_audio.clicked.connect(lambda: self.set_mode("audio"))
+
+        mode_layout.addWidget(self.btn_mode_video)
+        mode_layout.addWidget(self.btn_mode_audio)
+        mode_row.addWidget(mode_container)
+        mode_row.addStretch()
+        card_layout.addLayout(mode_row)
+
+        # 2. Linha horizontal com os três subcartões (Pasta de destino, Formato de saída e Qualidade)
         middle_row = QHBoxLayout()
         middle_row.setSpacing(14)
 
@@ -644,10 +975,10 @@ class MainWindow(QWidget):
         self.lbl_formato_icon = QLabel()
         self.lbl_formato_icon.setFixedSize(16, 16)
         self.lbl_formato_icon.setPixmap(get_document_pixmap(palette["text_secondary"], 16))
-        lbl_formato = QLabel("Formato de saída")
-        lbl_formato.setObjectName("subCardLabel")
+        self.lbl_formato = QLabel("Formato de saída")
+        self.lbl_formato.setObjectName("subCardLabel")
         lbl_formato_header.addWidget(self.lbl_formato_icon)
-        lbl_formato_header.addWidget(lbl_formato)
+        lbl_formato_header.addWidget(self.lbl_formato)
         lbl_formato_header.addStretch()
         subcard_formato_layout.addLayout(lbl_formato_header)
 
@@ -655,12 +986,124 @@ class MainWindow(QWidget):
         self.combo_formato.setObjectName("formatCombo")
         self.combo_formato.setCursor(Qt.PointingHandCursor)
         self._popular_formatos()
+        self.combo_formato.currentIndexChanged.connect(self._salvar_formato_escolhido)
 
         subcard_formato_layout.addWidget(self.combo_formato)
         middle_row.addWidget(subcard_formato, 1)
 
+        # Subcartão: Qualidade (Resolução no modo vídeo / Taxa de bits no modo áudio)
+        self.subcard_qualidade = QFrame()
+        self.subcard_qualidade.setObjectName("subCard")
+        subcard_qualidade_layout = QVBoxLayout(self.subcard_qualidade)
+        subcard_qualidade_layout.setContentsMargins(14, 12, 14, 12)
+        subcard_qualidade_layout.setSpacing(8)
+
+        lbl_qualidade_header = QHBoxLayout()
+        lbl_qualidade_header.setSpacing(6)
+        self.lbl_qualidade_icon = QLabel()
+        self.lbl_qualidade_icon.setFixedSize(16, 16)
+        qual_icon_pixmap = get_quality_pixmap(palette["text_secondary"], 16) if self.current_mode == "video" else get_audio_pixmap(palette["text_secondary"], 16)
+        self.lbl_qualidade_icon.setPixmap(qual_icon_pixmap)
+        self.lbl_qualidade = QLabel("Resolução" if self.current_mode == "video" else "Qualidade do áudio")
+        self.lbl_qualidade.setObjectName("subCardLabel")
+        lbl_qualidade_header.addWidget(self.lbl_qualidade_icon)
+        lbl_qualidade_header.addWidget(self.lbl_qualidade)
+        lbl_qualidade_header.addStretch()
+        subcard_qualidade_layout.addLayout(lbl_qualidade_header)
+
+        self.combo_qualidade = QComboBox()
+        self.combo_qualidade.setObjectName("qualityCombo")
+        self.combo_qualidade.setCursor(Qt.PointingHandCursor)
+        self._popular_qualidades()
+
+        subcard_qualidade_layout.addWidget(self.combo_qualidade)
+        middle_row.addWidget(self.subcard_qualidade, 1)
+
+        # O cartão de qualidade permanece inicialmente oculto até que uma URL seja analisada com sucesso
+        self.subcard_qualidade.hide()
+
         card_layout.addLayout(middle_row)
-        card_layout.addSpacing(6)
+
+        # Painel Discreto de Upscaling (FFmpeg Lanczos)
+        self.container_upscaling = QFrame()
+        self.container_upscaling.setObjectName("upscaleContainer")
+        self.container_upscaling.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        upscale_main_layout = QVBoxLayout(self.container_upscaling)
+        upscale_main_layout.setContentsMargins(10, 6, 10, 6)
+        upscale_main_layout.setSpacing(4)
+
+        # Linha de controles de Upscaling
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(10)
+
+        self.chk_upscaling = QCheckBox("Melhorar resolução (Upscaling)")
+        self.chk_upscaling.setObjectName("upscaleCheckBox")
+        self.chk_upscaling.setCursor(Qt.PointingHandCursor)
+        self.chk_upscaling.setChecked(False)
+        self.chk_upscaling.toggled.connect(self._on_upscale_toggled)
+
+        self.lbl_upscale_arrow = QLabel("→")
+        self.lbl_upscale_arrow.setStyleSheet(f"color: {palette['text_muted']}; font-weight: bold;")
+
+        self.combo_upscaling = QComboBox()
+        self.combo_upscaling.setObjectName("upscaleCombo")
+        self.combo_upscaling.setCursor(Qt.PointingHandCursor)
+        self.combo_upscaling.setEnabled(False)
+
+        self.lbl_upscale_info = QLabel(" ℹ️ ")
+        self.lbl_upscale_info.setObjectName("upscaleInfoLabel")
+        self.lbl_upscale_info.setCursor(Qt.WhatsThisCursor)
+        self.lbl_upscale_info.setToolTip(
+            "O upscaling convencional aumenta a resolução utilizando o algoritmo Lanczos do FFmpeg.\n"
+            "Ele redimensiona a imagem preservando proporções para telas maiores, mas não recupera\n"
+            "detalhes que não foram capturados na gravação original."
+        )
+
+        controls_row.addWidget(self.chk_upscaling)
+        controls_row.addWidget(self.lbl_upscale_arrow)
+        controls_row.addWidget(self.combo_upscaling)
+        controls_row.addWidget(self.lbl_upscale_info)
+        controls_row.addStretch()
+        upscale_main_layout.addLayout(controls_row)
+
+        # Caixa informativa de alto consumo de processamento/CPU
+        self.box_upscale_warning = QFrame()
+        self.box_upscale_warning.setObjectName("upscaleWarningBox")
+        self.box_upscale_warning.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        warning_box_layout = QHBoxLayout(self.box_upscale_warning)
+        warning_box_layout.setContentsMargins(8, 6, 8, 6)
+        warning_box_layout.setSpacing(8)
+
+        self.lbl_warning_icon = QLabel()
+        self.lbl_warning_icon.setPixmap(get_warning_pixmap(palette.get("warning_icon", "#D97706"), 16))
+        self.lbl_warning_icon.setFixedWidth(18)
+        self.lbl_warning_icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        warning_box_layout.addWidget(self.lbl_warning_icon)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+
+        self.lbl_warning_title = QLabel("Atenção: processamento intenso")
+        self.lbl_warning_title.setObjectName("upscaleWarningTitle")
+        text_layout.addWidget(self.lbl_warning_title)
+
+        self.lbl_warning_body = QLabel(
+            "O upscaling pode consumir bastante CPU, aumentar a temperatura do computador e "
+            "reduzir o desempenho de outros aplicativos. Em computadores mais modestos, vídeos "
+            "longos ou resoluções elevadas podem exigir bastante tempo de processamento."
+        )
+        self.lbl_warning_body.setObjectName("upscaleWarningBody")
+        self.lbl_warning_body.setWordWrap(True)
+        text_layout.addWidget(self.lbl_warning_body)
+
+        warning_box_layout.addLayout(text_layout)
+        upscale_main_layout.addWidget(self.box_upscale_warning)
+        self.box_upscale_warning.hide()
+
+        card_layout.addWidget(self.container_upscaling)
+        self.container_upscaling.hide()
 
         # 3. Botão Principal BAIXAR em azul ocupando toda a largura
         self.btn_baixar = QPushButton("Baixar")
@@ -989,6 +1432,21 @@ class MainWindow(QWidget):
             self.lbl_pasta_icon.setPixmap(get_folder_pixmap(palette["text_secondary"], 16))
         if hasattr(self, "lbl_formato_icon"):
             self.lbl_formato_icon.setPixmap(get_document_pixmap(palette["text_secondary"], 16))
+        if hasattr(self, "lbl_qualidade_icon"):
+            if self.current_mode == "video":
+                self.lbl_qualidade_icon.setPixmap(get_quality_pixmap(palette["text_secondary"], 16))
+            else:
+                self.lbl_qualidade_icon.setPixmap(get_audio_pixmap(palette["text_secondary"], 16))
+        if hasattr(self, "btn_mode_video") and hasattr(self, "btn_mode_audio"):
+            is_vid = (self.current_mode == "video")
+            self.btn_mode_video.setProperty("active", "true" if is_vid else "false")
+            self.btn_mode_audio.setProperty("active", "false" if is_vid else "true")
+            self.btn_mode_video.setIcon(get_video_icon("white" if is_vid else palette["text_secondary"], 16))
+            self.btn_mode_audio.setIcon(get_audio_icon("white" if not is_vid else palette["text_secondary"], 16))
+            self.btn_mode_video.style().unpolish(self.btn_mode_video)
+            self.btn_mode_video.style().polish(self.btn_mode_video)
+            self.btn_mode_audio.style().unpolish(self.btn_mode_audio)
+            self.btn_mode_audio.style().polish(self.btn_mode_audio)
         if hasattr(self, "btn_escolher"):
             self.btn_escolher.setIcon(get_folder_icon(palette["accent_blue"], 18))
         if hasattr(self, "action_link_icon"):
@@ -1005,6 +1463,9 @@ class MainWindow(QWidget):
             self.btn_tema_escuro.style().polish(self.btn_tema_escuro)
 
         # 6. Atualiza cores de status
+        if hasattr(self, "lbl_warning_icon"):
+            self.lbl_warning_icon.setPixmap(get_warning_pixmap(palette.get("warning_icon", "#D97706"), 16))
+
         if hasattr(self, "lbl_status"):
             self.aplicar_status(self.lbl_status.text(), "normal")
 
@@ -1048,7 +1509,8 @@ class MainWindow(QWidget):
     def iniciar_download(self):
         url = self.input_url.text().strip()
         pasta = self.input_pasta.text().strip()
-        formato = self.combo_formato.currentData(Qt.UserRole) or "mp4"
+        formato = self.combo_formato.currentData(Qt.UserRole) or ("mp4" if self.current_mode == "video" else "mp3")
+        qualidade = self.combo_qualidade.currentData(Qt.UserRole) or "best" if hasattr(self, "combo_qualidade") else "best"
 
         if not url:
             self.aplicar_status("● Erro: A URL não pode estar vazia.", "erro")
@@ -1059,9 +1521,40 @@ class MainWindow(QWidget):
 
         self.settings.setValue("download_folder", pasta)
         self.settings.setValue("output_format", formato)
+        self.settings.setValue("download_mode", self.current_mode)
+
+        # Impede uso de informações de URL diferente da analisada
+        if self.current_media_info and hasattr(self, "_analyzed_url") and self._analyzed_url != url:
+            self.current_media_info = None
+
+        v_quality = qualidade if self.current_mode == "video" else "best"
+        a_quality = qualidade if self.current_mode == "audio" else "best"
+
+        # Coleta parâmetro de Upscaling se ativado pelo usuário
+        upscale_target = None
+        if (self.current_mode == "video" and hasattr(self, "chk_upscaling") and
+            self.chk_upscaling.isChecked() and hasattr(self, "container_upscaling") and
+            not self.container_upscaling.isHidden()):
+            upscale_target = self.combo_upscaling.currentData(Qt.UserRole)
+
+        if self.current_mode == "video":
+            self.settings.setValue("video_quality", v_quality)
+        else:
+            self.settings.setValue("audio_quality", a_quality)
 
         self.combo_formato.setEnabled(False)
+        if hasattr(self, "combo_qualidade"):
+            self.combo_qualidade.setEnabled(False)
+        if hasattr(self, "chk_upscaling"):
+            self.chk_upscaling.setEnabled(False)
+        if hasattr(self, "combo_upscaling"):
+            self.combo_upscaling.setEnabled(False)
+        if hasattr(self, "btn_mode_video"):
+            self.btn_mode_video.setEnabled(False)
+        if hasattr(self, "btn_mode_audio"):
+            self.btn_mode_audio.setEnabled(False)
         self.btn_escolher.setEnabled(False)
+
         self.btn_baixar.setText("CANCELAR")
         self.btn_baixar.setIcon(QIcon())
         palette = get_theme_palette(self.current_theme)
@@ -1088,7 +1581,15 @@ class MainWindow(QWidget):
         browser_pref = self.settings.value("preferred_browser", "auto")
         chosen_browser = self.last_active_browser if browser_pref == "auto" else browser_pref
 
-        self.worker = DownloadWorker(url, pasta, output_format=formato, active_browser=chosen_browser)
+        self.worker = DownloadWorker(
+            url,
+            pasta,
+            output_format=formato,
+            active_browser=chosen_browser,
+            video_quality=v_quality,
+            audio_quality=a_quality,
+            upscale_quality=upscale_target
+        )
         self.worker.progress_signal.connect(self.atualizar_progresso)
         self.worker.finished_signal.connect(self.finalizar_download)
         self.worker.start()
@@ -1122,6 +1623,20 @@ class MainWindow(QWidget):
         self.btn_baixar.setIcon(get_download_button_icon("white", 18))
         self.btn_baixar.setEnabled(True)
         self.combo_formato.setEnabled(True)
+        if hasattr(self, "combo_qualidade"):
+            fmt = self.combo_formato.currentData(Qt.UserRole) or ""
+            if self.current_mode == "audio" and fmt in ("wav", "flac"):
+                self.combo_qualidade.setEnabled(False)
+            else:
+                self.combo_qualidade.setEnabled(True)
+        if hasattr(self, "btn_mode_video"):
+            self.btn_mode_video.setEnabled(True)
+        if hasattr(self, "btn_mode_audio"):
+            self.btn_mode_audio.setEnabled(True)
+        if hasattr(self, "chk_upscaling"):
+            self.chk_upscaling.setEnabled(True)
+        if hasattr(self, "combo_upscaling") and hasattr(self, "chk_upscaling"):
+            self.combo_upscaling.setEnabled(self.chk_upscaling.isChecked())
         self.btn_escolher.setEnabled(True)
         self.progress_bar.setRange(0, 100)
 
